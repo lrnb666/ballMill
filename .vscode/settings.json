@@ -1,0 +1,18 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder}/code/model:${workspaceFolder}/code/mamba"
+    },
+
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/code",
+        "${workspaceFolder}/code/model",
+        "${workspaceFolder}/code/mamba" // 注意：这里指向 mamba_ssm 的上一级
+    ],
+    
+    // 强制 Pyright 重新扫描
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.diagnosticMode": "workspace"
+}

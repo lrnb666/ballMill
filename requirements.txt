@@ -1,0 +1,12 @@
+# Third-party packages used under code/ (pip install -r requirements.txt)
+# PyTorch: for GPU builds see https://pytorch.org/get-started/locally/
+numpy
+pandas
+torch
+scikit-learn
+matplotlib
+tqdm
+xgboost
+lightgbm
+plotly
+# mamba-ssm

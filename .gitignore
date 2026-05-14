@@ -1,0 +1,13 @@
+# 忽略大型数据集
+*.npy
+*.pth
+*.pt
+*.whl
+mamba/
+
+data/*
+# 忽略环境和缓存
+miniconda3/
+__pycache__/
+# .vscode/
+.cursor/
