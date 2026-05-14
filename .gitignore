@@ -6,6 +6,7 @@
 mamba/
 
 data/*
+!data/processed_1min_data.csv
 # 忽略环境和缓存
 miniconda3/
 __pycache__/
