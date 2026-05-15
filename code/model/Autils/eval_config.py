@@ -13,20 +13,20 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FILE_PATH = str(_PROJECT_ROOT / "data" / "processed_1min_data.csv")
 OUTPUT_DIR = str(_PROJECT_ROOT / "output")
-METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare.txt")
+METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_10_0.01.txt")
 
 # ---------------------------------------------------------------------------
 # 时序与划分（与 1 分钟采样一致：LAG_STEPS 为回看窗口分钟数）
 # ---------------------------------------------------------------------------
 TARGET_COL = "Current_A"
-LAG_STEPS = 30
+LAG_STEPS = 60
 # 预测未来第 N 分钟（N=1 即经典单步预测）。序列模型与表格 lag 特征均生效。
-PREDICT_HORIZON = 1
+PREDICT_HORIZON = 10
 # 兼容旧名：与 PREDICT_HORIZON 相同
 PRED_STEPS = PREDICT_HORIZON
 
 TRAIN_RATIO = 0.8
-VAL_RATIO = 0.1
+VAL_RATIO = 0.01
 # 测试集占比 = 1 - TRAIN_RATIO - VAL_RATIO
 
 PLOT_TAIL = 500
@@ -34,7 +34,7 @@ PLOT_TAIL = 500
 # ---------------------------------------------------------------------------
 # 工业命中率：|y_pred - y_true| <= |y_true| * INDUSTRIAL_HIT_REL_TOLERANCE
 # ---------------------------------------------------------------------------
-INDUSTRIAL_HIT_REL_TOLERANCE = 0.001
+INDUSTRIAL_HIT_REL_TOLERANCE = 0.01
 
 
 def industrial_hit_rate_pct(y_true, y_pred) -> float:

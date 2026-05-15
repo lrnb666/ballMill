@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore")
 # ==========================================
 # 1. 配置（见 Autils/eval_config；PRED_STEPS 与 PREDICT_HORIZON 等价）
 # ==========================================
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 EPOCHS = 50
 LEARNING_RATE = 0.0005
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,6 +83,9 @@ test_loader = DataLoader(
 # ==========================================
 # 3. S-Mamba
 # ==========================================
+# ==========================================
+# 3. S-Mamba (已修复时序维度与特征提取)
+# ==========================================
 class SMambaBlock(nn.Module):
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
         super().__init__()
@@ -97,16 +100,18 @@ class SMambaBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x):
+        # Mamba 期待的 x 形状应当始终是: (B, L, d_model) -> 顺着时间轴 L 扫描
         residual = x
         x_fwd = self.mamba_forward(x)
+        # 序列翻转，实现反向时间扫描 (获取未来视角的上下文)
         x_bwd = self.mamba_backward(x.flip(dims=[1]))
         x_bwd = x_bwd.flip(dims=[1])
+        
         x = self.norm1(x_fwd + x_bwd + residual)
         residual = x
         x = self.ffn(x)
         x = self.norm2(x + residual)
         return x
-
 
 class SMamba(nn.Module):
     def __init__(self, seq_len, n_features, d_model=128, n_layers=2):
@@ -114,20 +119,29 @@ class SMamba(nn.Module):
         self.seq_len = seq_len
         self.n_features = n_features
         self.d_model = d_model
-        self.token_linear = nn.Linear(seq_len, d_model)
+        
+        # 【核心修复 1】：将特征维度 (17维) 映射到高维 d_model，完美保留时间轴 seq_len
+        self.feature_proj = nn.Linear(n_features, d_model)
+        
         self.layers = nn.ModuleList([SMambaBlock(d_model) for _ in range(n_layers)])
         self.proj = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        B, L, V = x.shape
-        x = x.transpose(1, 2)
-        x = self.token_linear(x)
+        # x 的原始形状: (B, L, V)
+        
+        # 1. 特征升维：(B, L, V) -> (B, L, d_model)
+        x = self.feature_proj(x)
+        
+        # 2. 双向 Mamba 沿着时间轴 L 进行深度状态扫描
         for layer in self.layers:
             x = layer(x)
-        x = self.proj(x)
-        x = x.mean(dim=1)
-        return x
-
+            
+        # 【核心修复 2】：绝不能用 mean()！时序预测必须提取最后一个时刻(最新)的状态！
+        x_last = x[:, -1, :]  # 形状变为 (B, d_model)
+        
+        # 3. 线性头预测目标电流
+        out = self.proj(x_last)  # 形状变为 (B, 1)
+        return out
 
 model = SMamba(seq_len=LAG_STEPS, n_features=X_raw.shape[1]).to(DEVICE)
 if torch.cuda.device_count() > 1:
@@ -142,7 +156,7 @@ criterion = nn.MSELoss()
 # ==========================================
 print("\n开始训练 S-Mamba...")
 best_val_loss = float("inf")
-patience = 10
+patience = 7
 counter = 0
 
 for epoch in range(EPOCHS):

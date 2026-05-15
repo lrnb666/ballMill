@@ -1,84 +1,99 @@
 
 ========================================================================
-[XGBoost]  2026-05-14 15:41:27 +0800
+[GRU]  2026-05-15 14:47:08 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.980006
-MAE=0.762715
-RMSE=5.261739
-MSE=27.685895
-SMAPE=2.1753
-IndustrialHit%=48.6742
+R2=0.952681
+MAE=2.418096
+RMSE=10.392851
+MSE=108.011359
+SMAPE=3.7979
+IndustrialHit%=85.9075
 ========================================================================
 
 ========================================================================
-[LightGBM]  2026-05-14 15:42:41 +0800
+[LSTM]  2026-05-15 14:55:46 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.955639
-MAE=0.869591
-RMSE=7.837535
-MSE=61.426957
-SMAPE=2.2227
-IndustrialHit%=46.8377
+R2=0.956076
+MAE=1.990053
+RMSE=10.013150
+MSE=100.263167
+SMAPE=3.6357
+IndustrialHit%=93.4430
 ========================================================================
 
 ========================================================================
-[LSTM]  2026-05-14 16:46:37 +0800
+[TCN]  2026-05-15 15:25:55 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.998068
-MAE=0.465507
-RMSE=1.635633
-MSE=2.675296
-SMAPE=2.0301
-IndustrialHit%=50.4158
+R2=0.958075
+MAE=2.962927
+RMSE=9.782567
+MSE=95.698608
+SMAPE=3.8904
+IndustrialHit%=71.9814
 ========================================================================
 
 ========================================================================
-[TCN]  2026-05-14 19:37:17 +0800
+[LightGBM]  2026-05-15 15:26:57 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.997688
-MAE=0.571993
-RMSE=1.789279
-MSE=3.201520
-SMAPE=2.0639
-IndustrialHit%=37.3573
+R2=0.932831
+MAE=2.100345
+RMSE=12.382268
+MSE=153.320571
+SMAPE=3.7207
+IndustrialHit%=94.3828
 ========================================================================
 
 ========================================================================
-[PCMP-Mamba]  2026-05-14 20:40:58 +0800
+[XGBoost]  2026-05-15 15:27:35 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.997967
-MAE=0.467670
-RMSE=1.677808
-MSE=2.815041
-SMAPE=2.0691
-IndustrialHit%=53.2447
+R2=0.956909
+MAE=1.660977
+RMSE=9.917694
+MSE=98.360647
+SMAPE=3.6763
+IndustrialHit%=95.7367
 ========================================================================
 
 ========================================================================
-[GRU]  2026-05-14 22:03:57 +0800
+[S-Mamba]  2026-05-15 16:27:42 +0800
 FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
-LAG_STEPS=30  PREDICT_HORIZON=1
-INDUSTRIAL_HIT_REL_TOLERANCE=0.001
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
 ------------------------------------------------------------------------
-R2=0.997715
-MAE=0.517115
-RMSE=1.778848
-MSE=3.164299
-SMAPE=2.0868
-IndustrialHit%=48.2085
+R2=0.939836
+MAE=1.891053
+RMSE=11.718929
+MSE=137.333292
+SMAPE=3.7588
+IndustrialHit%=96.5112
 ========================================================================
+
+========================================================================
+[PCMP-Mamba]  2026-05-15 16:49:47 +0800
+FILE_PATH=/home/lr/projects/ballMill/data/processed_1min_data.csv
+LAG_STEPS=60  PREDICT_HORIZON=10
+INDUSTRIAL_HIT_REL_TOLERANCE=0.01
+------------------------------------------------------------------------
+R2=0.959862
+MAE=1.485210
+RMSE=9.571840
+MSE=91.620128
+SMAPE=3.4854
+IndustrialHit%=96.6196
+========================================================================
+
