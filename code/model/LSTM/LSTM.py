@@ -21,7 +21,7 @@ from Autils.eval_config import (
     TRAIN_RATIO,
     VAL_RATIO,
     append_model_eval_report,
-    create_sequences,
+    create_sequences_multistep,
     print_standard_eval_report,
     regression_metrics,
     save_prediction_plot,
@@ -59,7 +59,7 @@ y_data = scaler_y.fit_transform(df[[TARGET_COL]].values)
 # ==========================================
 # 3. 序列
 # ==========================================
-X_seq, y_seq = create_sequences(X_data, y_data, LAG_STEPS, PREDICT_HORIZON)
+X_seq, y_seq = create_sequences_multistep(X_data, y_data, LAG_STEPS, PREDICT_HORIZON)
 
 total_len = len(X_seq)
 train_end = int(total_len * TRAIN_RATIO)
@@ -102,7 +102,10 @@ class BallMillLSTM(nn.Module):
 
 
 raw_model = BallMillLSTM(
-    input_size=X_data.shape[1], hidden_size=128, num_layers=2, output_size=1
+    input_size=X_data.shape[1],
+    hidden_size=128,
+    num_layers=2,
+    output_size=PREDICT_HORIZON,
 )
 if GPU_COUNT > 1:
     print("启用 DataParallel")
@@ -117,7 +120,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 # ==========================================
 # 5. 训练
 # ==========================================
-print("\n开始训练 LSTM...")
+print(f"\n开始训练 LSTM（连续 {PREDICT_HORIZON} 步）...")
 best_val_loss = float("inf")
 patience = 7
 counter = 0
@@ -151,7 +154,7 @@ for epoch in range(EPOCHS):
     if avg_v < best_val_loss:
         best_val_loss = avg_v
         state_dict = model.module.state_dict() if GPU_COUNT > 1 else model.state_dict()
-        torch.save(state_dict, "best_lstm_dual_gpu.pth")
+        torch.save(state_dict, "best_lstm_multistep.pth")
         counter = 0
     else:
         counter += 1
@@ -162,7 +165,7 @@ for epoch in range(EPOCHS):
 # ==========================================
 # 6. 评估
 # ==========================================
-checkpoint = torch.load("best_lstm_dual_gpu.pth", map_location=DEVICE)
+checkpoint = torch.load("best_lstm_multistep.pth", map_location=DEVICE)
 if GPU_COUNT > 1:
     model.module.load_state_dict(checkpoint)
 else:
@@ -170,18 +173,22 @@ else:
 
 model.eval()
 y_preds_scaled = []
+y_true_scaled = []
 with torch.no_grad():
-    for batch_x, _ in test_loader:
+    for batch_x, batch_y in test_loader:
         batch_x = batch_x.to(DEVICE)
         y_preds_scaled.append(model(batch_x).cpu().numpy())
+        y_true_scaled.append(batch_y.numpy())
 
-y_pred = scaler_y.inverse_transform(np.concatenate(y_preds_scaled)).flatten()
-y_true = scaler_y.inverse_transform(y_test).flatten()
+y_pred_matrix = np.concatenate(y_preds_scaled)
+y_true_matrix = np.concatenate(y_true_scaled)
+y_pred_inv = scaler_y.inverse_transform(y_pred_matrix.reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
+y_true_inv = scaler_y.inverse_transform(y_true_matrix.reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
 
-metrics = regression_metrics(y_true, y_pred)
-print_standard_eval_report("LSTM", metrics)
+metrics = regression_metrics(y_true_inv.flatten(), y_pred_inv.flatten())
+print_standard_eval_report(f"LSTM（连续 {PREDICT_HORIZON} 步）", metrics)
 append_model_eval_report(
-    "LSTM",
+    "LSTM-MultiStep",
     metrics,
     lag_steps=LAG_STEPS,
     predict_horizon=PREDICT_HORIZON,
@@ -190,7 +197,7 @@ append_model_eval_report(
 plt.figure(figsize=(10, 4))
 plt.plot(train_losses, label="train")
 plt.plot(val_losses, label="val")
-plt.title("LSTM loss")
+plt.title(f"LSTM loss (H={PREDICT_HORIZON})")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
@@ -198,11 +205,11 @@ plt.savefig(f"{OUTPUT_DIR}/lstm_loss_curve.png", dpi=120)
 plt.close()
 
 pred_png = save_prediction_plot(
-    y_true,
-    y_pred,
-    out_filename="lstm_predict.png",
-    title=f"Ball Mill Current — LSTM (H={PREDICT_HORIZON}, last {PLOT_TAIL})",
-    pred_label="LSTM Pred",
+    y_true_inv[:, -1],
+    y_pred_inv[:, -1],
+    out_filename="lstm_predict_multistep.png",
+    title=f"Ball Mill Current — LSTM step {PREDICT_HORIZON} (last {PLOT_TAIL})",
+    pred_label=f"LSTM Pred (step {PREDICT_HORIZON})",
 )
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")

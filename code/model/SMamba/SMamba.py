@@ -23,7 +23,7 @@ from Autils.eval_config import (
     TRAIN_RATIO,
     VAL_RATIO,
     append_model_eval_report,
-    create_sequences,
+    create_sequences_multistep,
     print_standard_eval_report,
     regression_metrics,
     save_prediction_plot,
@@ -32,7 +32,7 @@ from Autils.eval_config import (
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. 配置（见 Autils/eval_config；PRED_STEPS 与 PREDICT_HORIZON 等价）
+# 1. 配置（见 Autils/eval_config）
 # ==========================================
 BATCH_SIZE = 128
 EPOCHS = 50
@@ -56,7 +56,7 @@ scaler_y = MinMaxScaler()
 X_raw = scaler_x.fit_transform(df.values)
 y_raw = scaler_y.fit_transform(df[[TARGET_COL]].values)
 
-X_seq, y_seq = create_sequences(X_raw, y_raw, LAG_STEPS, PREDICT_HORIZON)
+X_seq, y_seq = create_sequences_multistep(X_raw, y_raw, LAG_STEPS, PREDICT_HORIZON)
 
 total_len = len(X_seq)
 train_end = int(total_len * TRAIN_RATIO)
@@ -114,36 +114,31 @@ class SMambaBlock(nn.Module):
         return x
 
 class SMamba(nn.Module):
-    def __init__(self, seq_len, n_features, d_model=128, n_layers=2):
+    def __init__(self, seq_len, n_features, d_model=128, n_layers=2, pred_len: int = 1):
         super().__init__()
         self.seq_len = seq_len
         self.n_features = n_features
         self.d_model = d_model
-        
-        # 【核心修复 1】：将特征维度 (17维) 映射到高维 d_model，完美保留时间轴 seq_len
+        self.pred_len = int(pred_len)
+
+        # 将特征维度映射到 d_model，保留时间轴 seq_len
         self.feature_proj = nn.Linear(n_features, d_model)
-        
+
         self.layers = nn.ModuleList([SMambaBlock(d_model) for _ in range(n_layers)])
-        self.proj = nn.Linear(d_model, 1)
+        self.proj = nn.Linear(d_model, self.pred_len)
 
     def forward(self, x):
-        # x 的原始形状: (B, L, V)
-        
-        # 1. 特征升维：(B, L, V) -> (B, L, d_model)
         x = self.feature_proj(x)
-        
-        # 2. 双向 Mamba 沿着时间轴 L 进行深度状态扫描
         for layer in self.layers:
             x = layer(x)
-            
-        # 【核心修复 2】：绝不能用 mean()！时序预测必须提取最后一个时刻(最新)的状态！
-        x_last = x[:, -1, :]  # 形状变为 (B, d_model)
-        
-        # 3. 线性头预测目标电流
-        out = self.proj(x_last)  # 形状变为 (B, 1)
-        return out
+        x_last = x[:, -1, :]
+        return self.proj(x_last)
 
-model = SMamba(seq_len=LAG_STEPS, n_features=X_raw.shape[1]).to(DEVICE)
+model = SMamba(
+    seq_len=LAG_STEPS,
+    n_features=X_raw.shape[1],
+    pred_len=PREDICT_HORIZON,
+).to(DEVICE)
 if torch.cuda.device_count() > 1:
     print(f"DataParallel | GPU={torch.cuda.device_count()}")
     model = nn.DataParallel(model)
@@ -154,7 +149,7 @@ criterion = nn.MSELoss()
 # ==========================================
 # 4. 训练
 # ==========================================
-print("\n开始训练 S-Mamba...")
+print(f"\n开始训练 S-Mamba（连续 {PREDICT_HORIZON} 步）...")
 best_val_loss = float("inf")
 patience = 7
 counter = 0
@@ -186,7 +181,7 @@ for epoch in range(EPOCHS):
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
         sd = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-        torch.save(sd, "best_smamba_model.pth")
+        torch.save(sd, "best_smamba_multistep.pth")
         counter = 0
     else:
         counter += 1
@@ -197,7 +192,7 @@ for epoch in range(EPOCHS):
 # ==========================================
 # 5. 评估
 # ==========================================
-state_dict = torch.load("best_smamba_model.pth", map_location=DEVICE)
+state_dict = torch.load("best_smamba_multistep.pth", map_location=DEVICE)
 if isinstance(model, nn.DataParallel):
     model.module.load_state_dict(state_dict)
 else:
@@ -213,24 +208,26 @@ with torch.no_grad():
         y_preds_scaled.append(preds.cpu().numpy())
         y_true_scaled.append(batch_y.numpy())
 
-y_pred = scaler_y.inverse_transform(np.concatenate(y_preds_scaled)).flatten()
-y_true = scaler_y.inverse_transform(np.concatenate(y_true_scaled)).flatten()
+y_pred_matrix = np.concatenate(y_preds_scaled)
+y_true_matrix = np.concatenate(y_true_scaled)
+y_pred_inv = scaler_y.inverse_transform(y_pred_matrix.reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
+y_true_inv = scaler_y.inverse_transform(y_true_matrix.reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
 
-metrics = regression_metrics(y_true, y_pred)
-print_standard_eval_report("S-Mamba", metrics)
+metrics = regression_metrics(y_true_inv.flatten(), y_pred_inv.flatten())
+print_standard_eval_report(f"S-Mamba（连续 {PREDICT_HORIZON} 步）", metrics)
 append_model_eval_report(
-    "S-Mamba",
+    "S-Mamba-MultiStep",
     metrics,
     lag_steps=LAG_STEPS,
     predict_horizon=PREDICT_HORIZON,
 )
 
 pred_png = save_prediction_plot(
-    y_true,
-    y_pred,
-    out_filename="smamba_predict.png",
-    title=f"Ball Mill Current — S-Mamba (H={PREDICT_HORIZON}, last {PLOT_TAIL})",
-    pred_label="S-Mamba Pred",
+    y_true_inv[:, -1],
+    y_pred_inv[:, -1],
+    out_filename="smamba_predict_multistep.png",
+    title=f"Ball Mill Current — S-Mamba step {PREDICT_HORIZON} (last {PLOT_TAIL})",
+    pred_label=f"S-Mamba Pred (step {PREDICT_HORIZON})",
 )
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")
@@ -242,14 +239,14 @@ else:
 
 
 def predict_next_horizon(recent_data_df):
-    """最近 LAG_STEPS 行（与训练列一致）→ 未来第 PREDICT_HORIZON 步电流。"""
+    """最近 LAG_STEPS 行（与训练列一致）→ 未来连续 PREDICT_HORIZON 步电流（原尺度）。"""
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.eval()
     with torch.no_grad():
         input_scaled = scaler_x.transform(recent_data_df.values)
         input_tensor = torch.FloatTensor(input_scaled).unsqueeze(0).to(DEVICE)
-        pred_scaled = core(input_tensor)
-        return float(scaler_y.inverse_transform(pred_scaled.cpu().numpy())[0, 0])
+        pred_scaled = core(input_tensor).cpu().numpy()
+        return scaler_y.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
 
 
 predict_next_minute = predict_next_horizon
