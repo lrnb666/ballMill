@@ -26,6 +26,7 @@ from Autils.eval_config import (
     create_sequences_multistep,
     print_standard_eval_report,
     regression_metrics,
+    release_gpu_memory,
     save_prediction_plot,
 )
 
@@ -250,3 +251,9 @@ def predict_next_horizon(recent_data_df):
 
 
 predict_next_minute = predict_next_horizon
+
+try:
+    del model, optimizer, train_loader, val_loader, test_loader, criterion, state_dict
+except NameError:
+    pass
+release_gpu_memory()

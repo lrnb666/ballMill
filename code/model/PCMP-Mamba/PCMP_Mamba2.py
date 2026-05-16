@@ -28,6 +28,7 @@ from Autils.eval_config import (
     create_sequences_multistep,
     print_standard_eval_report,
     regression_metrics,
+    release_gpu_memory,
 )
 
 warnings.filterwarnings("ignore")
@@ -636,3 +637,9 @@ plt.close()
 
 print(f"预测曲线已保存: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")
+
+try:
+    del model, optimizer, train_loader, val_loader, test_loader, criterion
+except NameError:
+    pass
+release_gpu_memory()

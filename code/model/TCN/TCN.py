@@ -25,6 +25,7 @@ from Autils.eval_config import (
     create_sequences_multistep,
     print_standard_eval_report,
     regression_metrics,
+    release_gpu_memory,
     save_prediction_plot,
 )
 
@@ -297,3 +298,9 @@ pred_png = save_prediction_plot(
 )
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")
+
+try:
+    del model, optimizer, train_loader, val_loader, test_loader, criterion, checkpoint
+except NameError:
+    pass
+release_gpu_memory()

@@ -13,7 +13,7 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FILE_PATH = str(_PROJECT_ROOT / "data" / "processed_1min_data.csv")
 OUTPUT_DIR = str(_PROJECT_ROOT / "output")
-METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_5_0.01.txt")
+METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_10_0.001.txt")
 
 # ---------------------------------------------------------------------------
 # 时序与划分
@@ -21,7 +21,7 @@ METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_5_0.
 TARGET_COL = "Current_A"
 LAG_STEPS = 60
 # 预测未来N分钟（例如 10，在多步预测中代表预测未来1~10分钟）
-PREDICT_HORIZON = 5
+PREDICT_HORIZON = 10
 PRED_STEPS = PREDICT_HORIZON
 
 TRAIN_RATIO = 0.8
@@ -33,7 +33,7 @@ PLOT_TAIL = 500
 # ---------------------------------------------------------------------------
 # 工业命中率与评估指标
 # ---------------------------------------------------------------------------
-INDUSTRIAL_HIT_REL_TOLERANCE = 0.01
+INDUSTRIAL_HIT_REL_TOLERANCE = 0.001
 
 def industrial_hit_rate_pct(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, dtype=float).ravel()
@@ -177,6 +177,29 @@ def save_prediction_plot(y_true, y_pred, *, out_filename: str, title: str, pred_
 
 def ensure_output_dir() -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def release_gpu_memory() -> None:
+    """在当前进程内尽量归还 PyTorch 占用的 CUDA 缓存块（配合 ``gc.collect()``）。
+
+    要点：
+
+    - **进程正常退出**时，操作系统会回收该进程占用的整块 GPU 显存；子进程跑完脚本后通常不必依赖本函数。
+    - ``torch.cuda.empty_cache()`` 主要把空闲块还给 **PyTorch 的显存池**，便于**同一进程**里连续跑多段训练时降低峰值碎片；不能替代进程退出，也**不能修复**驱动层的 GPU 失联。
+    - ``nvidia-smi`` 出现 **Unable to determine the device handle ... Unknown Error** 多与驱动/GPU 通信异常、Xid、硬件或电源有关；应查 ``dmesg``、日志与驱动版本，不能单靠 ``empty_cache()`` 解决。
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
 
 def xgb_preferred_device() -> str:
     try:

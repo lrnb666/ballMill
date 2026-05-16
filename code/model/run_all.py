@@ -10,9 +10,9 @@ MODEL_SCRIPTS = [
     "GRU/GRU.py",
     "LSTM/LSTM.py",
     "TCN/TCN.py",               # 请根据实际文件名修改
-    "LightGBM/LightGBM.py",
+    #"LightGBM/LightGBM.py",
     "XGBoost/XGBoost.py",
-    "CatBoost/CatBoost.py"
+    "CatBoost/CatBoost.py",
     "SMamba/SMamba.py",
     "PCMP-Mamba/PCMP_Mamba.py",
 ]

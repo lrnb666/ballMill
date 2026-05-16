@@ -26,6 +26,7 @@ from Autils.eval_config import (
     ensure_output_dir,
     print_standard_eval_report,
     regression_metrics,
+    release_gpu_memory,
 )
 
 warnings.filterwarnings("ignore")
@@ -166,3 +167,9 @@ plt.close()
 print(f"特征重要性图: {imp_path}")
 print(f"预测趋势图: {pred_png}")
 print(f"指标已追加至: {METRICS_REPORT_PATH}")
+
+try:
+    del model, train_pool, val_pool
+except NameError:
+    pass
+release_gpu_memory()
