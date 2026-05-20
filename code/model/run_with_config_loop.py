@@ -7,15 +7,15 @@ import time
 # 格式：(PREDICT_HORIZON, INDUSTRIAL_HIT_REL_TOLERANCE, LAG_STEPS)
 PARAM_SETS = [
    # (5,   0.005, 60),   # 第1组
-     (5,   0.001, 60),   # 第1组
-     (10,   0.001, 60), 
-     (15,   0.001, 60), 
-     (20,   0.001, 60), 
+    # (5,   0.001, 60),   # 第1组
+    # (10,   0.001, 60), 
+    # (15,   0.001, 60), 
+    # (20,   0.001, 60), 
 
-    # (5,   0.005, 60), 
+     (5,   0.005, 60), 
      (10,   0.005, 60), 
     (15,   0.005, 60), 
-     (20,   0.005, 60), 
+    # (20,   0.005, 60), 
     # (10,  0.005, 60),   # 第2组（需要就解开注释）
     # (5,   0.01,  60),   # 第3组
     # (15,  0.003, 60),   # 第4组
@@ -31,7 +31,12 @@ def update_config_file(pred_horizon, tolerance, lag_steps):
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 1. 更新预测步长
+    # 1. 更新 lag 与预测步长
+    content = re.sub(
+        r"LAG_STEPS\s*=\s*\d+",
+        f"LAG_STEPS = {lag_steps}",
+        content,
+    )
     content = re.sub(
         r"PREDICT_HORIZON\s*=\s*\d+",
         f"PREDICT_HORIZON = {pred_horizon}",
@@ -50,13 +55,7 @@ def update_config_file(pred_horizon, tolerance, lag_steps):
         content
     )
 
-    # 3. 自动生成报告文件名
-    report_name = f"model_eval_compare_{lag_steps}_{pred_horizon}_{tolerance}.txt"
-    content = re.sub(
-        r'METRICS_REPORT_PATH\s*=\s*str\(_PROJECT_ROOT\s*/\s*"output"\s*/\s*".*?"\)',
-        f'METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "{report_name}")',
-        content
-    )
+    # 3. 报告路径由 eval_config.get_metrics_report_path() 按 LAG/PRED/HIT 自动生成
 
     # 保存
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -66,7 +65,7 @@ def update_config_file(pred_horizon, tolerance, lag_steps):
     print(f"   LAG_STEPS          = {lag_steps}")
     print(f"   PREDICT_HORIZON    = {pred_horizon}")
     print(f"   误差容忍度         = {tolerance}")
-    print(f"   输出报告           = {report_name}")
+    print(f"   输出报告           = model_eval_compare_{lag_steps}_{pred_horizon}_{tolerance}.txt")
 
 def run_all_models():
     """运行你的批量脚本"""

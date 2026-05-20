@@ -5,16 +5,16 @@ import time
 # 切换到脚本所在目录
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-# 注意检查 TCN 文件夹下的文件名是不是 TCN.py
+
 MODEL_SCRIPTS = [
-    "GRU/GRU.py",
-    "LSTM/LSTM.py",
-    "TCN/TCN.py",               # 请根据实际文件名修改
-    #"LightGBM/LightGBM.py",
-    "XGBoost/XGBoost.py",
-    "CatBoost/CatBoost.py",
+   # "GRU/GRU.py",
+   # "LSTM/LSTM.py",
+   # "TCN/TCN.py",               # 请根据实际文件名修改
     "SMamba/SMamba.py",
-    "PCMP-Mamba/PCMP_Mamba.py",
+    "TimesNet/TimesNet.py",
+  #  "PatchTST/PatchTST.py",
+    "PCMP-Mamba/Times_Mamba9.py",
+     "PCMP-Mamba/Times_Mamba10.py",
 ]
 
 def run_all_models():

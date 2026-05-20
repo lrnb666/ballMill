@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
@@ -24,13 +23,17 @@ from Autils.eval_config import (
     VAL_RATIO,
     append_model_eval_report,
     create_sequences_multistep,
+    fit_minmax_scalers_train_only,
+    make_dataloader_generator,
     print_standard_eval_report,
     regression_metrics,
     release_gpu_memory,
-    save_prediction_plot,
+    save_multistep_horizon_plot,
+    set_global_seed,
 )
 
 warnings.filterwarnings("ignore")
+set_global_seed()
 
 # ==========================================
 # 1. 配置（见 Autils/eval_config）
@@ -52,10 +55,9 @@ df = df.ffill().bfill()
 print("正在进行工业数据去噪...")
 df = NR.clean_industrial_data(df)
 
-scaler_x = MinMaxScaler()
-scaler_y = MinMaxScaler()
-X_raw = scaler_x.fit_transform(df.values)
-y_raw = scaler_y.fit_transform(df[[TARGET_COL]].values)
+X_raw, y_raw, scaler_x, scaler_y = fit_minmax_scalers_train_only(
+    df.values, df[[TARGET_COL]].values
+)
 
 X_seq, y_seq = create_sequences_multistep(X_raw, y_raw, LAG_STEPS, PREDICT_HORIZON)
 
@@ -71,6 +73,7 @@ train_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train)),
     batch_size=BATCH_SIZE,
     shuffle=True,
+    generator=make_dataloader_generator(),
 )
 val_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
@@ -223,12 +226,12 @@ append_model_eval_report(
     predict_horizon=PREDICT_HORIZON,
 )
 
-pred_png = save_prediction_plot(
-    y_true_inv[:, -1],
-    y_pred_inv[:, -1],
-    out_filename="smamba_predict_multistep.png",
-    title=f"Ball Mill Current — S-Mamba step {PREDICT_HORIZON} (last {PLOT_TAIL})",
-    pred_label=f"S-Mamba Pred (step {PREDICT_HORIZON})",
+pred_png = save_multistep_horizon_plot(
+    y_true_inv,
+    y_pred_inv,
+    model_slug="smamba",
+    model_label="S-Mamba",
+    window_offset=val_end,
 )
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")

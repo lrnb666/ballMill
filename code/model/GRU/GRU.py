@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.metrics import mean_absolute_error
-from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from Aprocess import noiseReduce as NR
@@ -26,12 +25,17 @@ from Autils.eval_config import (
     industrial_hit_rate_pct,
     append_model_eval_report,
     create_sequences_multistep,  # <--- 使用多步的函数
+    fit_minmax_scalers_train_only,
+    make_dataloader_generator,
     print_standard_eval_report,
     regression_metrics,
     release_gpu_memory,
+    save_multistep_horizon_plot,
+    set_global_seed,
 )
 
 warnings.filterwarnings("ignore")
+set_global_seed()
 
 # ==========================================
 # 1. 配置
@@ -53,10 +57,9 @@ df = df.ffill().bfill()
 print("正在进行工业数据去噪...")
 df = NR.clean_industrial_data(df)
 
-scaler_x = MinMaxScaler()
-scaler_y = MinMaxScaler()
-X_raw = scaler_x.fit_transform(df.values)
-y_raw = scaler_y.fit_transform(df[[TARGET_COL]].values)
+X_raw, y_raw, scaler_x, scaler_y = fit_minmax_scalers_train_only(
+    df.values, df[[TARGET_COL]].values
+)
 print(f"特征总数: {X_raw.shape[1]}")
 
 # ==========================================
@@ -77,6 +80,7 @@ train_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train)),
     batch_size=BATCH_SIZE,
     shuffle=True,
+    generator=make_dataloader_generator(),
 )
 val_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
@@ -227,26 +231,13 @@ plt.tight_layout()
 plt.savefig(f"{OUTPUT_DIR}/gru_loss_curve_multistep.png", dpi=120)
 plt.close()
 
-# 【修改 5】：绘制预测曲线时，我们选取【最后一步】进行绘制，代表模型最远的预测能力
-y_true_last = y_true_inv[:, -1][-PLOT_TAIL:]
-y_pred_last = y_pred_inv[:, -1][-PLOT_TAIL:]
-
-plt.figure(figsize=(15, 5))
-plt.plot(y_true_last, label=f"True Current (Step {PREDICT_HORIZON})", color="blue", alpha=0.6)
-plt.plot(y_pred_last, label=f"GRU Pred (Step {PREDICT_HORIZON})", color="red", linestyle="--", alpha=0.8)
-upper = y_true_last * (1.0 + INDUSTRIAL_HIT_REL_TOLERANCE)
-lower = y_true_last * (1.0 - INDUSTRIAL_HIT_REL_TOLERANCE)
-plt.fill_between(
-    np.arange(len(y_true_last)), lower, upper, color="gray", alpha=0.15, 
-    label=f"±{INDUSTRIAL_HIT_REL_TOLERANCE*100:g}% band"
+pred_png = save_multistep_horizon_plot(
+    y_true_inv,
+    y_pred_inv,
+    model_slug="gru",
+    model_label="GRU",
+    window_offset=val_end,
 )
-plt.title(f"Ball Mill Current — GRU (Horizon {PREDICT_HORIZON}, last {PLOT_TAIL})")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-pred_png = f"{OUTPUT_DIR}/gru_predict_multistep.png"
-plt.savefig(pred_png, dpi=150)
-plt.close()
 
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")

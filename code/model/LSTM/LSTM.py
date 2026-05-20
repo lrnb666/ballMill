@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from Aprocess import noiseReduce as NR
@@ -22,13 +21,17 @@ from Autils.eval_config import (
     VAL_RATIO,
     append_model_eval_report,
     create_sequences_multistep,
+    fit_minmax_scalers_train_only,
+    make_dataloader_generator,
     print_standard_eval_report,
     regression_metrics,
     release_gpu_memory,
-    save_prediction_plot,
+    save_multistep_horizon_plot,
+    set_global_seed,
 )
 
 warnings.filterwarnings("ignore")
+set_global_seed()
 
 # ==========================================
 # 1. 配置（见 Autils/eval_config；多卡可自行 export CUDA_VISIBLE_DEVICES）
@@ -52,10 +55,9 @@ df = df.ffill().bfill()
 print("正在进行工业数据去噪...")
 df = NR.clean_industrial_data(df)
 
-scaler_x = MinMaxScaler()
-scaler_y = MinMaxScaler()
-X_data = scaler_x.fit_transform(df.values)
-y_data = scaler_y.fit_transform(df[[TARGET_COL]].values)
+X_data, y_data, scaler_x, scaler_y = fit_minmax_scalers_train_only(
+    df.values, df[[TARGET_COL]].values
+)
 
 # ==========================================
 # 3. 序列
@@ -76,6 +78,7 @@ train_loader = DataLoader(
     batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=nw,
+    generator=make_dataloader_generator(),
 )
 val_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
@@ -205,12 +208,12 @@ plt.tight_layout()
 plt.savefig(f"{OUTPUT_DIR}/lstm_loss_curve.png", dpi=120)
 plt.close()
 
-pred_png = save_prediction_plot(
-    y_true_inv[:, -1],
-    y_pred_inv[:, -1],
-    out_filename="lstm_predict_multistep.png",
-    title=f"Ball Mill Current — LSTM step {PREDICT_HORIZON} (last {PLOT_TAIL})",
-    pred_label=f"LSTM Pred (step {PREDICT_HORIZON})",
+pred_png = save_multistep_horizon_plot(
+    y_true_inv,
+    y_pred_inv,
+    model_slug="lstm",
+    model_label="LSTM",
+    window_offset=val_end,
 )
 print(f"预测曲线: {pred_png}")
 print(f"指标已追加: {METRICS_REPORT_PATH}")

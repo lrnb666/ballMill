@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +14,6 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FILE_PATH = str(_PROJECT_ROOT / "data" / "processed_1min_data.csv")
 OUTPUT_DIR = str(_PROJECT_ROOT / "output")
-METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_10_0.001.txt")
 
 # ---------------------------------------------------------------------------
 # 时序与划分
@@ -21,7 +21,12 @@ METRICS_REPORT_PATH = str(_PROJECT_ROOT / "output" / "model_eval_compare_60_10_0
 TARGET_COL = "Current_A"
 LAG_STEPS = 60
 # 预测未来N分钟（例如 10，在多步预测中代表预测未来1~10分钟）
-PREDICT_HORIZON = 10
+PREDICT_HORIZON = 15
+# ---------------------------------------------------------------------------
+# 工业命中率与评估指标
+# ---------------------------------------------------------------------------
+INDUSTRIAL_HIT_REL_TOLERANCE = 0.005
+
 PRED_STEPS = PREDICT_HORIZON
 
 TRAIN_RATIO = 0.8
@@ -29,11 +34,117 @@ VAL_RATIO = 0.01
 # 测试集占比 = 1 - TRAIN_RATIO - VAL_RATIO
 
 PLOT_TAIL = 500
+GLOBAL_SEED = 42
 
-# ---------------------------------------------------------------------------
-# 工业命中率与评估指标
-# ---------------------------------------------------------------------------
-INDUSTRIAL_HIT_REL_TOLERANCE = 0.001
+
+def eval_config_tag() -> str:
+    """与 model_eval_compare_60_5_0.005.txt 一致的参数标签。"""
+    return f"{LAG_STEPS}_{PREDICT_HORIZON}_{INDUSTRIAL_HIT_REL_TOLERANCE:g}"
+
+
+def get_metrics_report_path() -> str:
+    return str(_PROJECT_ROOT / "output" / f"model_eval_compare_{eval_config_tag()}.txt")
+
+
+METRICS_REPORT_PATH = get_metrics_report_path()
+
+
+def set_global_seed(seed: int | None = None) -> int:
+    """固定 Python / NumPy / PyTorch 随机性，便于复现实验。"""
+    seed = int(GLOBAL_SEED if seed is None else seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+    return seed
+
+
+def make_dataloader_generator(seed: int | None = None):
+    try:
+        import torch
+
+        g = torch.Generator()
+        g.manual_seed(int(GLOBAL_SEED if seed is None else seed))
+        return g
+    except Exception:
+        return None
+
+
+def sequence_split_indices(
+    n_raw: int,
+    *,
+    lag_steps: int | None = None,
+    predict_horizon: int | None = None,
+    train_ratio: float | None = None,
+    val_ratio: float | None = None,
+) -> tuple[int, int, int]:
+    """原始序列长度 -> (n_windows, train_end, val_end)。"""
+    lag = int(lag_steps if lag_steps is not None else LAG_STEPS)
+    h = int(predict_horizon if predict_horizon is not None else PREDICT_HORIZON)
+    tr = float(train_ratio if train_ratio is not None else TRAIN_RATIO)
+    vr = float(val_ratio if val_ratio is not None else VAL_RATIO)
+    n_windows = n_raw - lag - h + 1
+    if n_windows <= 0:
+        raise ValueError("序列过短，无法满足 LAG_STEPS 与 PREDICT_HORIZON")
+    train_end = int(n_windows * tr)
+    val_end = int(n_windows * (tr + vr))
+    return n_windows, train_end, val_end
+
+
+def raw_train_end_index(
+    train_end: int,
+    *,
+    lag_steps: int | None = None,
+    predict_horizon: int | None = None,
+) -> int:
+    """仅用训练窗口覆盖到的原始行（含标签）拟合 scaler，避免泄露。"""
+    lag = int(lag_steps if lag_steps is not None else LAG_STEPS)
+    h = int(predict_horizon if predict_horizon is not None else PREDICT_HORIZON)
+    return train_end + lag + h - 1
+
+
+def fit_minmax_scalers_train_only(
+    df_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    train_ratio: float | None = None,
+    val_ratio: float | None = None,
+    lag_steps: int | None = None,
+    predict_horizon: int | None = None,
+):
+    """在训练段拟合 MinMaxScaler，再变换全量（无验证/测试统计量泄露）。"""
+    from sklearn.preprocessing import MinMaxScaler
+
+    _, train_end, _ = sequence_split_indices(
+        len(df_values),
+        lag_steps=lag_steps,
+        predict_horizon=predict_horizon,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+    )
+    raw_end = raw_train_end_index(
+        train_end, lag_steps=lag_steps, predict_horizon=predict_horizon
+    )
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+    scaler_x.fit(df_values[:raw_end])
+    scaler_y.fit(y_values[:raw_end])
+    return (
+        scaler_x.transform(df_values),
+        scaler_y.transform(y_values),
+        scaler_x,
+        scaler_y,
+    )
+
 
 def industrial_hit_rate_pct(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, dtype=float).ravel()
@@ -148,8 +259,124 @@ def append_model_eval_report(model_name: str, metrics: dict, *, lag_steps: int, 
     with open(METRICS_REPORT_PATH, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-def save_prediction_plot(y_true, y_pred, *, out_filename: str, title: str, pred_label: str, plot_tail: int | None = None) -> str:
+def horizon_step_index(step: int | None = None) -> int:
+    """多步矩阵列下标：1 表示第 1 分钟，-1 或 None 表示最后一步 PREDICT_HORIZON。"""
+    if step is None or step == -1:
+        return PREDICT_HORIZON - 1
+    s = int(step)
+    if not 1 <= s <= PREDICT_HORIZON:
+        raise ValueError(f"step 须在 1..{PREDICT_HORIZON} 内")
+    return s - 1
+
+
+def target_time_index(win_idx: np.ndarray, step_idx: int, *, axis_mode: str = "sequence") -> np.ndarray:
+    """
+    sequence: 滑窗样本 i 的第 step 列 → 时刻 i + LAG_STEPS + step_idx
+    lag_table: 表格 lag 行 g 的第 step 列 → 时刻 g + step_idx（特征已含 LAG）
+    """
+    if axis_mode == "sequence":
+        return win_idx + LAG_STEPS + step_idx
+    if axis_mode == "lag_table":
+        return win_idx + step_idx
+    raise ValueError(f"未知 axis_mode: {axis_mode}")
+
+
+def extract_aligned_horizon_series(
+    y_true_matrix,
+    y_pred_matrix,
+    *,
+    step: int | None = None,
+    plot_tail: int | None = None,
+    window_offset: int = 0,
+    axis_mode: str = "sequence",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """将 (n_windows, H) 矩阵按「目标时刻」对齐为 1D 序列。"""
+    yt_m = np.asarray(y_true_matrix, dtype=float)
+    yp_m = np.asarray(y_pred_matrix, dtype=float)
+    if yt_m.ndim == 1:
+        yt_m = yt_m.reshape(-1, 1)
+    if yp_m.ndim == 1:
+        yp_m = yp_m.reshape(-1, 1)
+    step_idx = horizon_step_index(step)
+    tail = int(plot_tail if plot_tail is not None else PLOT_TAIL)
+    n = yt_m.shape[0]
+    start = max(0, n - tail)
+    win_idx = np.arange(start, n) + int(window_offset)
+    x = target_time_index(win_idx, step_idx, axis_mode=axis_mode)
+    return x, yt_m[start:, step_idx], yp_m[start:, step_idx]
+
+
+def prediction_plot_basename(model_slug: str, *, step: int | None = None) -> str:
+    """例: gru_predict_60_5_0.005_h5.png"""
+    step_no = PREDICT_HORIZON if step is None or step == -1 else int(step)
+    return f"{model_slug}_predict_{eval_config_tag()}_h{step_no}.png"
+
+
+def save_multistep_horizon_plot(
+    y_true_matrix,
+    y_pred_matrix,
+    *,
+    model_slug: str,
+    model_label: str | None = None,
+    step: int | None = None,
+    plot_tail: int | None = None,
+    window_offset: int = 0,
+    axis_mode: str = "sequence",
+    out_filename: str | None = None,
+) -> str:
+    """测试集末尾曲线：x 为目标时刻索引，y 为该时刻真值/预测值。"""
     import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    step_no = PREDICT_HORIZON if step is None or step == -1 else int(step)
+    x, yt, yp = extract_aligned_horizon_series(
+        y_true_matrix,
+        y_pred_matrix,
+        step=step,
+        plot_tail=plot_tail,
+        window_offset=window_offset,
+        axis_mode=axis_mode,
+    )
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fname = out_filename or prediction_plot_basename(model_slug, step=step)
+    out_path = os.path.join(OUTPUT_DIR, fname)
+    _hit_band_pct = INDUSTRIAL_HIT_REL_TOLERANCE * 100
+    label = model_label or model_slug
+
+    plt.figure(figsize=(15, 5))
+    plt.plot(x, yt, label=f"True (step {step_no})", color="blue", alpha=0.6)
+    plt.plot(x, yp, label=f"{label} Pred (step {step_no})", color="red", linestyle="--", alpha=0.8)
+    upper = yt * (1.0 + INDUSTRIAL_HIT_REL_TOLERANCE)
+    lower = yt * (1.0 - INDUSTRIAL_HIT_REL_TOLERANCE)
+    plt.fill_between(x, lower, upper, color="gray", alpha=0.15, label=f"±{_hit_band_pct:g}% band")
+    plt.xlabel("Target time index (1-min grid)")
+    plt.title(
+        f"{label} — lag={LAG_STEPS} horizon={PREDICT_HORIZON} "
+        f"hit±{INDUSTRIAL_HIT_REL_TOLERANCE:g} — last {len(x)} targets (step {step_no})"
+    )
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    return out_path
+
+
+def save_prediction_plot(
+    y_true,
+    y_pred,
+    *,
+    out_filename: str,
+    title: str,
+    pred_label: str,
+    plot_tail: int | None = None,
+    x_values: np.ndarray | None = None,
+) -> str:
+    """兼容旧接口；若传入矩阵请优先用 save_multistep_horizon_plot。"""
+    import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -159,15 +386,21 @@ def save_prediction_plot(y_true, y_pred, *, out_filename: str, title: str, pred_
 
     yt = np.asarray(y_true, dtype=float).ravel()[-tail:]
     yp = np.asarray(y_pred, dtype=float).ravel()[-tail:]
+    x = (
+        np.asarray(x_values, dtype=float).ravel()[-tail:]
+        if x_values is not None
+        else np.arange(len(yt))
+    )
     _hit_band_pct = INDUSTRIAL_HIT_REL_TOLERANCE * 100
 
     plt.figure(figsize=(15, 5))
-    plt.plot(yt, label="True Current", color="blue", alpha=0.6)
-    plt.plot(yp, label=pred_label, color="red", linestyle="--", alpha=0.8)
+    plt.plot(x, yt, label="True Current", color="blue", alpha=0.6)
+    plt.plot(x, yp, label=pred_label, color="red", linestyle="--", alpha=0.8)
     upper = yt * (1.0 + INDUSTRIAL_HIT_REL_TOLERANCE)
     lower = yt * (1.0 - INDUSTRIAL_HIT_REL_TOLERANCE)
-    plt.fill_between(np.arange(len(yt)), lower, upper, color="gray", alpha=0.15, label=f"±{_hit_band_pct:g}% band")
+    plt.fill_between(x, lower, upper, color="gray", alpha=0.15, label=f"±{_hit_band_pct:g}% band")
     plt.title(title)
+    plt.xlabel("Target time index (1-min grid)")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()

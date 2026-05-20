@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
 
-# 你原来的导入不动
+# 导入不动
 from sklearn.metrics import mean_absolute_error
 from Aprocess import noiseReduce as NR
 from Autils.eval_config import (
@@ -27,9 +27,12 @@ from Autils.eval_config import (
     print_standard_eval_report,
     regression_metrics,
     release_gpu_memory,
+    save_multistep_horizon_plot,
+    set_global_seed,
 )
 
 warnings.filterwarnings("ignore")
+set_global_seed()
 
 # ==========================================
 # 1. 数据加载与预处理
@@ -88,7 +91,7 @@ model = CatBoostRegressor(
     # 多卡核心配置（已帮你写好）
     # ========================
     task_type='GPU',          # 启用 GPU
-    devices='0:1',            # 直接使用你 2 张显卡
+    devices='0:1',            # 直接使用 2 张显卡
 )
 
 # 用 Pool 格式多卡训练更稳定（CatBoost官方推荐）
@@ -145,24 +148,15 @@ imp_path = f"{OUTPUT_DIR}/catboost_importance.png"
 plt.savefig(imp_path, dpi=150)
 plt.close()
 
-y_true_last = y_true_matrix[:, -1][-PLOT_TAIL:]
-y_pred_last = y_pred_matrix[:, -1][-PLOT_TAIL:]
-
-plt.figure(figsize=(15, 5))
-plt.plot(y_true_last, label=f"True (Step {PREDICT_HORIZON})", color="blue", alpha=0.6)
-plt.plot(y_pred_last, label=f"CatBoost Pred (Step {PREDICT_HORIZON})", color="green", linestyle="--")
-
-upper = y_true_last * (1.0 + INDUSTRIAL_HIT_REL_TOLERANCE)
-lower = y_true_last * (1.0 - INDUSTRIAL_HIT_REL_TOLERANCE)
-plt.fill_between(np.arange(len(y_true_last)), lower, upper, color="gray", alpha=0.15)
-
-plt.title(f"Ball Mill Current — CatBoost Native (Horizon {PREDICT_HORIZON})")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-pred_png = f"{OUTPUT_DIR}/catboost_predict.png"
-plt.savefig(pred_png, dpi=150)
-plt.close()
+test_start = train_size + val_size
+pred_png = save_multistep_horizon_plot(
+    y_true_matrix,
+    y_pred_matrix,
+    model_slug="catboost",
+    model_label="CatBoost",
+    window_offset=test_start,
+    axis_mode="lag_table",
+)
 
 print(f"特征重要性图: {imp_path}")
 print(f"预测趋势图: {pred_png}")
