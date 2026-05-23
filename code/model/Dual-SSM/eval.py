@@ -1,15 +1,3 @@
-"""
-Dual-SSM (Dual-Stream Spectral and State-Space Model) — DDP双卡 Gated改进版
-------------------------------------
-核心架构设计：
-1. 保持 TimesNet 的 InceptionBlock 不变，提取频域多周期特征。
-2. 引入 Mamba 扫描路径提取时域状态特征，增加前后线性投影防止维度错位。
-3. [核心改进] 引入 Gated Fusion (门控融合)，废弃固定的 alpha，动态计算双流特征权重。
-4. [核心改进] 增加双流独立 LayerNorm，防止梯度劫持和特征互相覆盖。
-5. 优化训练循环，为门控网络赋予更高的独立学习率，加速双流权重分配。
-6. 支持 python xxx.py 傻瓜式一键双卡/多卡 DDP 训练。
-"""
-
 import os
 import warnings
 import numpy as np
@@ -25,26 +13,22 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from mamba_ssm import Mamba
 
-# 注意：请确保你的本地环境存在这三个包/文件
+# 你的本地依赖包
 from Aprocess import noiseReduce as NR
 from Autils.eval_config import (
-    FILE_PATH, LAG_STEPS, PREDICT_HORIZON, TARGET_COL, TRAIN_RATIO, VAL_RATIO,
+    FILE_PATH, TARGET_COL, TRAIN_RATIO, VAL_RATIO,
     append_model_eval_report, create_sequences_multistep,
-    fit_minmax_scalers_train_only, industrial_hit_rate_pct,
-    make_dataloader_generator, print_standard_eval_report,
+    fit_minmax_scalers_train_only, print_standard_eval_report,
     regression_metrics, release_gpu_memory,
     save_multistep_horizon_plot, set_global_seed,
-    INDUSTRIAL_HIT_REL_TOLERANCE, OUTPUT_DIR
+    OUTPUT_DIR
 )
 
 warnings.filterwarnings("ignore")
 set_global_seed()
 
-# 将模型保存在 OUTPUT_DIR 下防止相对路径找不到
-MODEL_SAVE_PATH = os.path.join(OUTPUT_DIR, "best_Dual_SSM_ddp.pth")
-
 # ==========================================
-# 1. 核心组件 
+# 1. 核心组件 (保持不变)
 # ==========================================
 class RevIN(nn.Module):
     def __init__(self, num_features, eps=1e-5):
@@ -70,8 +54,6 @@ class InceptionBlockV1(nn.Module):
         self.conv5 = nn.Conv2d(in_channels, out_channels, kernel_size=5, padding=2)
         self.project = nn.Conv2d(out_channels * 3, out_channels, kernel_size=1)
         self.gelu = nn.GELU()
-        
-        # 修复极小通道 GroupNorm 报错问题
         self.norm = nn.GroupNorm(min(4, out_channels), out_channels) if out_channels >= 2 else nn.Identity()
 
     def forward(self, x):
@@ -80,59 +62,36 @@ class InceptionBlockV1(nn.Module):
         out = self.gelu(self.norm(self.project(x_cat)))
         return out + x_res
 
-# ==========================================
-# 2. Dual-SSM 核心块 (Gated Fusion 改进版)
-# ==========================================
 class DualSSMBlock(nn.Module):
     def __init__(self, d_model, top_k, dropout=0.1):
         super().__init__()
         self.k = top_k
         self.d_model = d_model
         
-        # [修复] 双流独立归一化，防止特征互相干扰
         self.norm_spectral = nn.LayerNorm(d_model)
         self.norm_state = nn.LayerNorm(d_model)
-        
-        # --- 频域分支 (Spectral Stream) ---
         self.inception = InceptionBlockV1(d_model, d_model)
-        
-        # --- 时域分支 (State-Space Stream) ---
-        # [修复] 增加前后线性投影，保护 Mamba 状态空间
         self.mamba_proj_in = nn.Linear(d_model, d_model)
         self.mamba = Mamba(d_model=d_model, d_state=16, d_conv=4, expand=2)
         self.mamba_proj_out = nn.Linear(d_model, d_model)
-        
         self.dropout = nn.Dropout(dropout)
-        
-        # [修复] 门控融合机制 (Gated Fusion) 替代固定 alpha
         self.fusion_gate = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
         )
         self.out_proj = nn.Linear(d_model, d_model)
-        
-        # 运行时变量：记录当前 batch 平均 Mamba 占比（方便终端打印）
-        self.current_mamba_ratio = 0.5
+        self.gate_history = []
 
     def forward(self, x):
         B, T, C = x.shape
-        
-        # ==========================================
-        # Stream 1: State-Space (Mamba) 独立路径
-        # ==========================================
         x_state = self.norm_state(x)
-        x_state = self.mamba_proj_in(x_state)
-        mamba_out = self.mamba(x_state)
-        mamba_out = self.mamba_proj_out(mamba_out)
+        mamba_in = self.mamba_proj_in(x_state)
+        mamba_out = self.mamba_proj_out(self.mamba(mamba_in)) + x_state
         
-        # ==========================================
-        # Stream 2: Spectral (FFT + Inception) 独立路径
-        # ==========================================
         x_spectral = self.norm_spectral(x)
         xf = torch.fft.rfft(x_spectral, dim=1)
         amp = torch.abs(xf).mean(dim=0).mean(dim=-1)
         amp[0] = 0  
-        
         valid_freqs = (amp > 0).sum().item()
         k = min(self.k, valid_freqs)
         
@@ -140,37 +99,24 @@ class DualSSMBlock(nn.Module):
         if k > 0:
             top_amps, top_freqs = torch.topk(amp, k)
             weights = torch.softmax(top_amps, dim=0)
-            
             for i in range(k):
                 freq = top_freqs[i].item()
                 period = max(T // freq, 1) if freq > 0 else T
                 period = min(period, T)
-                
                 pad_len = (period - T % period) % period
-                if pad_len > 0:
-                    x_pad = torch.cat([x_spectral, x_spectral[:, -1:, :].repeat(1, pad_len, 1)], dim=1)
-                else:
-                    x_pad = x_spectral
+                x_pad = torch.cat([x_spectral, x_spectral[:, -1:, :].repeat(1, pad_len, 1)], dim=1) if pad_len > 0 else x_spectral
                 T_pad = x_pad.shape[1]
-                
                 x_2d = x_pad.transpose(1, 2).contiguous().reshape(B, C, T_pad // period, period)
                 out_2d = self.inception(x_2d)
                 out_1d = out_2d.reshape(B, C, T_pad).transpose(1, 2).contiguous()
                 inception_res += out_1d[:, :T, :] * weights[i]
 
-        # ==========================================
-        # 深度门控融合 (Gated Fusion)
-        # ==========================================
         concat_features = torch.cat([mamba_out, inception_res], dim=-1)
         g = self.fusion_gate(concat_features) 
-        
-        # 记录均值，供控制台打印监控 (g越接近1代表Mamba权重越大)
-        self.current_mamba_ratio = g.mean().item()
-        
-        # 动态按比例融合
+        if not self.training:
+            self.gate_history.append(g.mean().item())
         fused = g * mamba_out + (1 - g) * inception_res 
         fused = self.out_proj(fused)
-
         return x + self.dropout(fused)
 
 class DualSSM(nn.Module):
@@ -179,10 +125,7 @@ class DualSSM(nn.Module):
         self.seq_len, self.pred_len, self.num_vars, self.target_idx = seq_len, pred_len, num_vars, target_idx
         self.revin = RevIN(num_vars)
         self.enc_embedding = nn.Linear(num_vars, d_model)
-        
-        # 堆叠 DualSSM Block
         self.blocks = nn.ModuleList([DualSSMBlock(d_model, top_k) for _ in range(e_layers)])
-        
         self.head = nn.Sequential(
             nn.Flatten(start_dim=1),
             nn.Linear(seq_len * d_model, pred_len * num_vars)
@@ -200,25 +143,28 @@ class DualSSM(nn.Module):
 # ==========================================
 # 3. 内部 Worker (负责每张卡上的训练)
 # ==========================================
-def train_worker(local_rank, world_size):
-    # 1. 初始化进程组
+# [修改] 增加 lag_steps 和 pred_steps 作为函数参数
+def train_worker(local_rank, world_size, lag_steps, pred_steps):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12356'  
     dist.init_process_group(backend='nccl', rank=local_rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
     
+    # [修改] 动态设置当前实验的模型保存路径
+    model_save_path = os.path.join(OUTPUT_DIR, f"best_Dual_SSM_in{lag_steps}_out{pred_steps}.pth")
+    
     if local_rank == 0:
-        print(f"Dual-SSM | 启动双卡 DDP 分布式训练 (可用显卡: {world_size})...")
+        print(f"\nDual-SSM | DDP 训练启动 | 输入: {lag_steps} -> 预测: {pred_steps}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # 2. 数据准备
     df = pd.read_csv(FILE_PATH, parse_dates=["time"]).sort_values("time").ffill().bfill()
     df = NR.clean_industrial_data(df.set_index("time"))
     cols = list(df.columns)
     target_idx = cols.index(TARGET_COL)
     
     X_raw, y_raw, _, scaler_y = fit_minmax_scalers_train_only(df.values, df[[TARGET_COL]].values)
-    X_seq, y_seq = create_sequences_multistep(X_raw, y_raw, LAG_STEPS, PREDICT_HORIZON)
+    # [修改] 使用传入的动态参数构建序列
+    X_seq, y_seq = create_sequences_multistep(X_raw, y_raw, lag_steps, pred_steps)
 
     t1, t2 = int(len(X_seq)*TRAIN_RATIO), int(len(X_seq)*(TRAIN_RATIO+VAL_RATIO))
     
@@ -226,19 +172,17 @@ def train_worker(local_rank, world_size):
     val_dataset = TensorDataset(torch.FloatTensor(X_seq[t1:t2]), torch.FloatTensor(y_seq[t1:t2]))
     test_dataset = TensorDataset(torch.FloatTensor(X_seq[t2:]), torch.FloatTensor(y_seq[t2:]))
 
-    # 3. DDP 数据切分 Sampler
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
     
-    PER_GPU_BATCH = 128 // world_size
+    PER_GPU_BATCH = 160 // world_size
     train_loader = DataLoader(train_dataset, batch_size=PER_GPU_BATCH, sampler=train_sampler, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=PER_GPU_BATCH, sampler=val_sampler, num_workers=4, pin_memory=True)
 
-    # 4. 模型与优化器设定
-    model = DualSSM(LAG_STEPS, PREDICT_HORIZON, len(cols), target_idx, d_model=64).to(local_rank)
+    # [修改] 使用传入的动态参数初始化模型
+    model = DualSSM(lag_steps, pred_steps, len(cols), target_idx, d_model=64).to(local_rank)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     
-    # [修复] 为 fusion_gate 分配 10倍的学习率，让其快速学会平衡双流
     base_params = [p for n, p in model.named_parameters() if 'fusion_gate' not in n]
     gate_params = [p for n, p in model.named_parameters() if 'fusion_gate' in n]
     
@@ -250,7 +194,6 @@ def train_worker(local_rank, world_size):
     criterion = nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=(local_rank==0))
 
-    # 5. 训练主循环
     best_val, patience, counter = float("inf"), 8, 0
     for epoch in range(50):
         train_sampler.set_epoch(epoch) 
@@ -273,7 +216,6 @@ def train_worker(local_rank, world_size):
             train_loss_sum += loss.item() * bx.size(0)
             train_samples += bx.size(0)
         
-        # 跨卡同步计算 Train Loss
         train_tensor = torch.tensor([train_loss_sum, train_samples], device=local_rank)
         dist.all_reduce(train_tensor, op=dist.ReduceOp.SUM)
         global_train_loss = (train_tensor[0] / train_tensor[1]).item()
@@ -289,32 +231,32 @@ def train_worker(local_rank, world_size):
                 val_loss_sum += batch_loss * bx.size(0)
                 val_samples += bx.size(0)
         
-        # 跨卡同步计算 Val Loss
         val_tensor = torch.tensor([val_loss_sum, val_samples], device=local_rank)
         dist.all_reduce(val_tensor, op=dist.ReduceOp.SUM)
         global_val_loss = (val_tensor[0] / val_tensor[1]).item()
         
-        # [修改] 打印 Loss 和 每一层当前的 Mamba 融合占比百分比
         if local_rank == 0:
             current_lr = optimizer.param_groups[0]['lr']
-            
             gate_infos = []
             for i, block in enumerate(model.module.blocks):
-                # 乘 100 转换为百分比
-                mamba_pct = block.current_mamba_ratio * 100 
-                gate_infos.append(f"L{i}_Mamba:{mamba_pct:.1f}%")
+                avg_mamba_ratio = sum(block.gate_history) / len(block.gate_history) if len(block.gate_history) > 0 else 0.5
+                mamba_pct = avg_mamba_ratio * 100 
+                fft_pct = 100 - mamba_pct
+                gate_infos.append(f"L{i}(Mamba:{mamba_pct:.1f}%|FFT:{fft_pct:.1f}%)")
             
-            gate_str = " | ".join(gate_infos)
-            print(f"Epoch {epoch+1} | Train Loss: {global_train_loss:.6f} | Val Loss: {global_val_loss:.6f} | LR: {current_lr:.6f} | Weights: [{gate_str}]")
+            gate_str = " - ".join(gate_infos)
+            print(f"Epoch {epoch+1} | Train Loss: {global_train_loss:.5f} | Val Loss: {global_val_loss:.5f} | LR: {current_lr:.6f} | {gate_str}")
         
+        for block in model.module.blocks:
+            block.gate_history.clear()
+            
         scheduler.step(global_val_loss)
         
-        # 早停判断
         if global_val_loss < best_val:
             best_val = global_val_loss
             counter = 0
             if local_rank == 0:
-                torch.save(model.module.state_dict(), MODEL_SAVE_PATH) 
+                torch.save(model.module.state_dict(), model_save_path) 
         else:
             counter += 1
             if counter >= patience: 
@@ -324,11 +266,13 @@ def train_worker(local_rank, world_size):
 
     dist.barrier()
 
-    # 6. 单卡测试与评估 
+    # ==========================================
+    # 测试与【逐步(Step-wise)】评估阶段
+    # ==========================================
     if local_rank == 0:
-        print("\n[Rank 0] 加载最佳权重进行测试评估...")
-        test_model = DualSSM(LAG_STEPS, PREDICT_HORIZON, len(cols), target_idx, d_model=64).to(local_rank)
-        test_model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=f'cuda:{local_rank}'))
+        print(f"\n[Rank 0] 加载最佳权重进行测试评估 ({lag_steps} 步预测 {pred_steps} 步)...")
+        test_model = DualSSM(lag_steps, pred_steps, len(cols), target_idx, d_model=64).to(local_rank)
+        test_model.load_state_dict(torch.load(model_save_path, map_location=f'cuda:{local_rank}'))
         test_model.eval()
         
         test_loader_single = DataLoader(test_dataset, batch_size=128, shuffle=False)
@@ -338,28 +282,90 @@ def train_worker(local_rank, world_size):
                 preds.append(test_model(bx.to(local_rank)).cpu().numpy())
                 trues.append(by.numpy())
 
-        y_p = scaler_y.inverse_transform(np.concatenate(preds).reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
-        y_t = scaler_y.inverse_transform(np.concatenate(trues).reshape(-1, 1)).reshape(-1, PREDICT_HORIZON)
+        # 形状恢复为 (Samples, pred_steps)
+        y_p = scaler_y.inverse_transform(np.concatenate(preds).reshape(-1, 1)).reshape(-1, pred_steps)
+        y_t = scaler_y.inverse_transform(np.concatenate(trues).reshape(-1, 1)).reshape(-1, pred_steps)
 
-        metrics = regression_metrics(y_t.flatten(), y_p.flatten())
-        print_standard_eval_report(f"Dual-SSM (连续 {PREDICT_HORIZON} 步)", metrics)
+        # 1. 整体均值评估 (保持你原有的输出格式)
+        metrics_global = regression_metrics(y_t.flatten(), y_p.flatten())
+        print_standard_eval_report(f"Dual-SSM 全局指标 ({pred_steps} 步)", metrics_global)
         append_model_eval_report(
-            "Dual-SSM-MultiStep", metrics, 
-            lag_steps=LAG_STEPS, predict_horizon=PREDICT_HORIZON
+            f"Dual-SSM-MultiStep-In{lag_steps}-Out{pred_steps}", metrics_global, 
+            lag_steps=lag_steps, predict_horizon=pred_steps
         )
+        save_multistep_horizon_plot(y_t, y_p, model_slug=f"dual_ssm_in{lag_steps}_out{pred_steps}", model_label="Dual-SSM", window_offset=t2)
 
-        save_multistep_horizon_plot(y_t, y_p, model_slug="dual_ssm_ddp", model_label="Dual-SSM", window_offset=t2)
+        # -----------------------------------------------------
+        # 2. [新增] 逐步(每一分钟)准确率统计与保存 
+        # -----------------------------------------------------
+        step_metrics_list = []
+        for step in range(pred_steps):
+            yt_step = y_t[:, step]
+            yp_step = y_p[:, step]
+            
+            # 手动计算各项核心回归指标
+            mse = np.mean((yt_step - yp_step)**2)
+            rmse = np.sqrt(mse)
+            mae = np.mean(np.abs(yt_step - yp_step))
+            
+            # 防止除以 0 计算 MAPE
+            mask = yt_step != 0
+            mape = np.mean(np.abs((yt_step[mask] - yp_step[mask]) / yt_step[mask])) * 100 if np.any(mask) else 0.0
+            
+            # 你可以在此处加入你自己定义的 industrial_hit_rate_pct 逻辑
+            # hit_rate = industrial_hit_rate_pct(yt_step, yp_step, ...) 
+            
+            step_metrics_list.append({
+                "Future_Step": step + 1,  # 第1分钟, 第2分钟 ...
+                "MSE": round(mse, 4),
+                "RMSE": round(rmse, 4),
+                "MAE": round(mae, 4),
+                "MAPE(%)": round(mape, 4)
+            })
+            
+        # 将逐步结果转换为 DataFrame 并保存为单独的 CSV
+        df_step_metrics = pd.DataFrame(step_metrics_list)
+        step_csv_filename = os.path.join(OUTPUT_DIR, f"DualSSM_Stepwise_Acc_in{lag_steps}_out{pred_steps}.csv")
+        df_step_metrics.to_csv(step_csv_filename, index=False)
+        
+        print("\n" + "="*50)
+        print(f"✅ 逐步预测准确率已保存至: {step_csv_filename}")
+        print("前 5 步准确率预览:")
+        print(df_step_metrics.head(5).to_string(index=False))
+        print("="*50 + "\n")
+
         release_gpu_memory()
 
     dist.destroy_process_group()
 
 # ==========================================
-# 4. 外部启动器
+# 4. 外部启动器 (支持多实验批量运行)
 # ==========================================
 if __name__ == "__main__":
+    
+    # [新增] 在这里配置你想跑的实验列表
+    # 格式：{"lag": 过去多少分钟, "pred": 预测未来多少分钟}
+    experiments = [
+       # {"lag": 120, "pred": 20},
+     #   {"lag": 120, "pred": 30},
+         {"lag": 120, "pred": 60}, # 可以随时解除注释，让它排队自己跑
+    ]
+    
     world_size = torch.cuda.device_count()
-    if world_size > 1:
-        mp.spawn(train_worker, args=(world_size,), nprocs=world_size, join=True)
-    else:
-        print("未检测到多张显卡，自动回退到单卡训练。")
-        train_worker(0, 1)
+    
+    for exp in experiments:
+        lag = exp["lag"]
+        pred = exp["pred"]
+        
+        print(f"\n{'#'*60}")
+        print(f" 即将启动实验: 使用过去 {lag} 分钟，预测未来 {pred} 分钟")
+        print(f"{'#'*60}")
+        
+        if world_size > 1:
+            # 传入多出的参数: args=(world_size, lag, pred)
+            mp.spawn(train_worker, args=(world_size, lag, pred), nprocs=world_size, join=True)
+        else:
+            print("未检测到多张显卡，自动回退到单卡训练。")
+            train_worker(0, 1, lag, pred)
+        
+        print(f"✅ 实验 (In:{lag} -> Out:{pred}) 运行结束！\n")

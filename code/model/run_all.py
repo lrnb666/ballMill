@@ -7,14 +7,15 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
 MODEL_SCRIPTS = [
-   # "GRU/GRU.py",
-   # "LSTM/LSTM.py",
-   # "TCN/TCN.py",               # 请根据实际文件名修改
+    "GRU/GRU.py",
+    "LSTM/LSTM.py",
+    "TCN/TCN.py",              
+    "PatchTST/PatchTST.py",
+    "DLinear/DLinear.py",
     "SMamba/SMamba.py",
     "TimesNet/TimesNet.py",
-  #  "PatchTST/PatchTST.py",
-    "PCMP-Mamba/Times_Mamba9.py",
-     "PCMP-Mamba/Times_Mamba10.py",
+    "Dual-SSM/Dual-SSM.py"
+  
 ]
 
 def run_all_models():

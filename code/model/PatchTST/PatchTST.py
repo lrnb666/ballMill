@@ -40,7 +40,7 @@ set_global_seed()
 # ==========================================
 # 1. 配置
 # ==========================================
-BATCH_SIZE = 128
+BATCH_SIZE = 500
 EPOCHS = 50
 LEARNING_RATE = 0.0005
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

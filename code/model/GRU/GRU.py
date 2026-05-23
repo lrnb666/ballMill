@@ -40,7 +40,7 @@ set_global_seed()
 # ==========================================
 # 1. 配置
 # ==========================================
-BATCH_SIZE = 128
+BATCH_SIZE = 1024
 EPOCHS = 50
 LEARNING_RATE = 0.001
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,11 +84,11 @@ train_loader = DataLoader(
 )
 val_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val)),
-    batch_size=BATCH_SIZE,
+    batch_size=128,
 )
 test_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_test), torch.FloatTensor(y_test)),
-    batch_size=BATCH_SIZE,
+    batch_size=128,
 )
 
 # ==========================================

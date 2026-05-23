@@ -162,17 +162,17 @@ t2 = int(len(X_seq) * (TRAIN_RATIO + VAL_RATIO))
 
 train_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_seq[:t1]), torch.FloatTensor(y_seq[:t1])),
-    batch_size=128,
+    batch_size=256,
     shuffle=True,
     generator=make_dataloader_generator(),
 )
 val_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_seq[t1:t2]), torch.FloatTensor(y_seq[t1:t2])),
-    batch_size=128
+    batch_size=256
 )
 test_loader = DataLoader(
     TensorDataset(torch.FloatTensor(X_seq[t2:]), torch.FloatTensor(y_seq[t2:])),
-    batch_size=128
+    batch_size=256
 )
 
 # ==========================================
